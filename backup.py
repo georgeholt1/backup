@@ -1,17 +1,21 @@
 import datetime
 import logging
 import os
+import threading
+
 from pprint import pprint
 from shutil import copyfile
+from socket import gethostname
 from time import sleep
 from tqdm import tqdm
-from tqdm._utils import _term_move_up
+from tqdm.utils import _term_move_up
 
 from backup_config import (
     source_dirs,
     backup_locs,
     exclude_file_types,
-    log_setup
+    log_setup,
+    notes
 )
 
 
@@ -45,7 +49,7 @@ def get_files(source_dirs):
     return file_count, file_paths
 
 
-def make_backup_directory(backup_loc):
+def make_backup_directory(backup_loc, timestamp):
     '''
     Make a timestamped backup directory within another directory.
     
@@ -58,10 +62,13 @@ def make_backup_directory(backup_loc):
     -------
     backup_dir : str
         Path to the timestamped backup directory.
+    timestamp : str
+        Formatted time stamp.
     '''
     backup_dir = os.path.join(
         backup_loc,
-        datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+        timestamp
+        # datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
     )
     
     if not os.path.isdir(backup_dir):
@@ -105,8 +112,8 @@ def make_backup_file_path(source_dirs, backup_dir, source_file_path):
             backup_file_path = os.path.join(backup_dir, base_path)
             break
     if backup_file_path is None:
-        raise ValueError('Somehow, the source file doesn\'t match any source'
-                         + 'path.')
+        raise ValueError('Something has gone horribly wrong.\nThis shouldn\'t'
+                         +' be able to happen.')
     return backup_file_path
 
 
@@ -145,26 +152,81 @@ def setup_log(log_location, log_level):
     log_location : path
         Path to log file.
     log_level : str
-        Either ERROR or INFO.
+        Either ERROR, INFO or DEBUG.
     
     Raises
     ------
     ValueError
-        If log_level is not ERROR or INFO.
+        If log_level is not ERROR, INFO or DEBUG.
     '''
-    if log_level not in ['ERROR', 'INFO']:
-        raise ValueError('Log level must be ERROR or INFO.')
+    if log_level not in ['ERROR', 'INFO', 'DEBUG']:
+        raise ValueError('Log level must be ERROR, INFO or DEBUG.')
     elif log_level == 'ERROR':
         level = logging.ERROR
     elif log_level == 'INFO':
         level = logging.INFO
+    elif log_level == 'DEBUG':
+        level = logging.DEBUG
     log_path = os.path.abspath(log_location)
     logging.basicConfig(filename=log_path,
                         level=level,
                         filemode='w')
     print('The logging level is set as {}\n'.format(log_level))
-    
 
+
+def backup_notes(backup_location,
+                 source_dirs,
+                 backup_locs,
+                 excluded_types,
+                 timestamp,
+                 notes):
+    '''Write notes on the backup to a file.
+    
+    Parameters
+    ----------
+    backup_location : str
+        Where the current backup is being written.
+    source_dirs : tuple
+        First element is source directories. Second element is alias.
+    backup_locs : list
+        Elements are strings of backup locations.
+    excluded_types : list
+        List of strings of excluded file extensions.
+    timestamp : str
+        Timestamp string of this backup.
+    notes : str
+        Any notes to be written to this note file.
+    '''
+    note_file_name = 'backup_notes.txt'
+    note_file_path = os.path.join(backup_location, note_file_name)
+    with open(note_file_path, 'w') as f:
+        f.write(  'Date\n'
+                + '                 {}\n\n'.format(timestamp))
+        f.write(  'Machine\n'
+                + '                 {}\n\n'.format(gethostname()))
+        f.write(  'Source folders\n')
+        for i in range(len(source_dirs)):
+            f.write('                 {}. {}\n'.format(i, source_dirs[i][0]))
+        f.write('\n')
+        f.write(  'Aliases\n')
+        for i in range(len(source_dirs)):
+            f.write('                 {}. {}\n'.format(i, source_dirs[i][1]))
+        f.write('\n')
+        f.write('Backup locations\n')
+        for bup_loc in backup_locs:
+            if bup_loc != backup_location:
+                f.write('                 {}\n'.format(bup_loc))
+            else:
+                f.write('                 {} (here)\n'.format(bup_loc))
+        f.write('\n')
+        f.write(  'Excluded\n')
+        for excl_type in excluded_types:
+            f.write('                 {}\n'.format(excl_type))
+        f.write('\n')
+        f.write(  'Notes\n'
+                + '                 {}'.format(notes))
+        
+    
 def main():
     '''Create backups of source_dirs to backup_locs.'''
     # setting up log
@@ -178,9 +240,10 @@ def main():
     print('')
     
     # make timestamped backup directories
+    timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
     backup_dirs = []
     for dest in backup_locs:
-        backup_dirs.append(make_backup_directory(dest))    
+        backup_dirs.append(make_backup_directory(dest, timestamp))    
     print('The following backup locations have been created:')
     for entry in backup_dirs:
         print('   \'{}\''.format(entry))
@@ -193,11 +256,20 @@ def main():
                                                      len(backup_locs)))
     logging.info(' FOUND {} FILES'.format(total_num_files))
     
+    # keep track of failed copies
+    failed_copies = 0
+    
     # loop over each backup location
     for backup_dir in tqdm(backup_dirs,
                            desc='Backups',
                            leave=False):
         tqdm.write('\n')  # for tqdm
+        backup_notes(backup_dir,
+                     source_dirs,
+                     backup_dirs,
+                     exclude_file_types,
+                     timestamp,
+                     notes)
         
         # loop over each file
         for f in tqdm(file_paths,
@@ -212,33 +284,45 @@ def main():
                 backup_file_path = make_backup_file_path(source_dirs,
                                                         backup_dir,
                                                         f)
-                
                 # make directory tree
                 if not os.path.isdir(os.path.dirname(backup_file_path)):
                     logging.info(' MAKING DIRECTORY AT {}'.format(
                         os.path.dirname(backup_file_path)))
+                    logging.debug(' MAKING DIRECTORY AT {}'.format(
+                        os.path.dirname(backup_file_path)))
                     os.makedirs(os.path.dirname(backup_file_path))
-                
                 # copy the file
                 logging.info(' ATTEMPTING TO COPY {} TO {}'.format(
                     f, backup_file_path))
                 try:
-                    tqdm_prefix = _term_move_up() + '\r'
-                    tqdm.write(tqdm_prefix + '{}'.format(f))
                     copyfile(f, backup_file_path, follow_symlinks=False)
                     logging.info(' SUCCESS')
                 except:
                     logging.error(' FAILED TO COPY {} TO {}'.format(
                         f, backup_file_path
                     ))
+                    failed_copies += 1
             else:
                 logging.info(' EXCLUDED')
                 continue
+            
+            if log_setup[1] == 'DEBUG':
+                sleep(1)
         
         tqdm_prefix = _term_move_up() + '\r'
-        tqdm.write(tqdm_prefix + 'Finished backing up to {}'.format(backup_dir))
-        
-    print('\nFinished')
+        tqdm.write(tqdm_prefix + 'Completed backup to {}'.format(backup_dir))
+    
+    if failed_copies is 0:
+        print('\nFinished with no failed copy actions')
+    elif failed_copies is 1:
+        print('\nFinished with 1 failed copy action')
+    else:
+        print('\nFinished with {} failed copy actions'.format(failed_copies))
+
+    if failed_copies is not 0:
+        print('See log file for details of failures')
+    print('Exiting')
+    
 
 if __name__ == '__main__':
     main()
